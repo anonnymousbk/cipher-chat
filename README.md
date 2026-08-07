@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/icon.png" width="150" alt="CipherText Logo">
+  <img src="icon.png" width="150" alt="CipherText Logo">
   
   # CipherText - Enterprise Secure Chat
   

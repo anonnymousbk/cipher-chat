@@ -461,7 +461,6 @@ def user_management_submenu():
                 print(f" {Colors.CYAN}4.{Colors.RESET} Remover Conta Permanentemente")
                 print(f" {Colors.BRIGHT_MAGENTA}5.{Colors.RESET} Interceptar Sessão (Terminal Chat)")
                 print(f" {Colors.YELLOW}6.{Colors.RESET} MODO ESPIÃO (Monitorar Conversas Ao Vivo)")
-                print(f" {Colors.CYAN}7.{Colors.RESET} Configurar Chave Camuflagem (Stealth Mode)")
                 print(f" {Colors.WHITE}0.{Colors.RESET} Voltar à Pesquisa")
                 
                 sub_opt = input("\n> ")
@@ -495,13 +494,6 @@ def user_management_submenu():
                     terminal_chat(user)
                 elif sub_opt == "6":
                     spy_mode(user)
-                elif sub_opt == "7":
-                    new_key = input("Digite a nova chave (ex: admin123): ").strip()
-                    if new_key:
-                        _firebase_req(f"users/{user}/settings/stealthKey", method="PUT", data=new_key)
-                        print(f"{Colors.GREEN}Chave Stealth configurada para {new_key}!{Colors.RESET}")
-                        print(f"{Colors.YELLOW}[!] O usuário deve fazer login pelo menos uma vez para o app baixar essa chave.{Colors.RESET}")
-                    input("\nPressione ENTER...")
         else:
             print(f"\n{Colors.YELLOW}Usuário não encontrado. Deseja criar?{Colors.RESET}")
             ans = input("(s/n): ").strip().lower()
@@ -691,6 +683,7 @@ def main_menu():
         print(f" {Colors.CYAN}1.{Colors.RESET} Gerenciar Usuários e Dispositivos")
         print(f" {Colors.CYAN}2.{Colors.RESET} Comunicados e Atualizações")
         print(f" {Colors.CYAN}3.{Colors.RESET} Loja Secreta (Gerenciar Produtos)")
+        print(f" {Colors.CYAN}4.{Colors.RESET} Configurar Chave Camuflagem (Global)")
         print(f" {Colors.WHITE}0.{Colors.RESET} Sair")
         
         opt = input("\nSelecione uma operação: ")
@@ -698,6 +691,13 @@ def main_menu():
         if opt == "1": user_management_submenu()
         elif opt == "2": system_announcements()
         elif opt == "3": store_management_submenu()
+        elif opt == "4":
+            new_key = input("\nDigite a nova chave de camuflagem (ex: admin123): ").strip()
+            if new_key:
+                new_key_hash = hashlib.sha256(new_key.encode('utf-8')).hexdigest()
+                _firebase_req("app_config/stealthKey", method="PUT", data=new_key_hash)
+                print(f"{Colors.GREEN}Chave Stealth Global configurada com sucesso (Criptografia SHA-256 E2E)!{Colors.RESET}")
+            input("\nPressione ENTER...")
         elif opt == "0": break
 
 if __name__ == "__main__":
